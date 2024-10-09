@@ -1,13 +1,10 @@
 import random
 import os
-import pandas as pd
 import cv2
-from PIL import Image
 import glob
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torchvision.transforms import v2
 import matplotlib.pyplot as plt
@@ -16,16 +13,7 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from tqdm import tqdm
 
 
-# # Path to the image folder
-# data_path = "data"
-
-
-# # The input dimension, with a size of 256x256, for future resizing of the images
-# input_dim = (256, 256)
-
-
-# -------- Create custom dataset class and a dataloader --------
-
+# ----- Create custom dataset class and a dataloader -----
 
 class CustomDataset(Dataset):
 
@@ -36,9 +24,6 @@ class CustomDataset(Dataset):
         # Get list of dataset folders
         dataset = glob.glob(self.imgs_path + purpose)
         dataset_purpose = "".join(dataset).split("/")[1]
-
-        # dataset_partitions = glob.glob(self.imgs_path + "*")
-        print(f"Searching in: {os.path.join(self.imgs_path, purpose, '*')}")
 
         self.data = []
         for partition_path in dataset:
@@ -59,7 +44,7 @@ class CustomDataset(Dataset):
         self.class_map = {"normal": 0, "pneumonia": 1}
         self.transform = transform
 
-        print(f"Dataset for {dataset_purpose} (size: {len(self.data)})")
+        print(f"Loaded dataset for {dataset_purpose} (size: {len(self.data)})")
 
     def __len__(self):
         return len(self.data)
@@ -72,43 +57,32 @@ class CustomDataset(Dataset):
         img = torch.tensor(img, dtype=torch.float32)
 
         # Change shape from (H, W, C) to (C, H, W)
-        img = img.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+        img = img.permute(2, 0, 1)
 
-        # print(f"Image shape after resizing: {img.shape}")
-        # print(type(img))
-
-        img = self.transform(img)  # Apply transformation
-
-        # Check shape after transformation
-        # print(f"Image shape after transform: {img.shape}")
-        # print(type(img))
+        img = self.transform(img)  # Apply transformation to image
 
         class_id = self.class_map[class_name]
-        # class_id = torch.tensor([class_id])
         class_id = torch.tensor(class_id).to(self.device)
 
         return img, class_id
 
 
-# Data Augmentation
+# ----- Data Augmentation -----
 
+# Transformation for training data
 transform_train = v2.Compose(
     [
-        v2.Resize((256, 256), antialias=None),
-        v2.Grayscale(1),
-        v2.ToTensor(),
-        # v2.RandomErasing(p=0.2, scale=(0.02, 0.1)),
-        # v2.GaussianBlur(kernel_size=3),
-        v2.RandomHorizontalFlip(p=0.5),
-        v2.RandomRotation(degrees=(0, 20)),
-        # v2.RandomResizedCrop(
-        #     size=(256, 256), scale=(0.7, 1), ratio=(1, 1), antialias=None
-        # ),
-        # v2.ColorJitter(contrast=0.2),
+        v2.Resize((256, 256), antialias=None),  # Resize to 256x256
+        v2.Grayscale(1),            # 3 color channels to grayscale (1 channel)
+        v2.ToTensor(),                      # Transform images to tensors
+        v2.RandomHorizontalFlip(p=0.5),     # Randomly flip images horizontally
+        v2.RandomRotation(degrees=(0, 20)),  # Random rotations (0-20 degrees)
+        # Normalize values to mean 0.5 and std 0.5
         v2.Normalize((0.5,), (0.5,)),
     ]
 )
 
+# Transformation for validation and test data (to fit network input)
 transform_vt = v2.Compose(
     [
         v2.Resize((256, 256), antialias=None),
@@ -149,30 +123,40 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
 
 
+# ----- Network architecture -----
 class xray_model(nn.Module):
     def __init__(self):
         super(xray_model, self).__init__()
-        # 8 (batch-size) x 3 x 256 x 256
+
+        # Convolutional network
+        # 16 (batch-size) x 1 x 256 x 256
         self.conv1 = nn.Conv2d(
-            in_channels=1, out_channels=28, kernel_size=3, padding=1
-        )  # 8 x 28 x 256 x 256
-        self.maxpool1 = nn.MaxPool2d(kernel_size=2)  # 8 x 28 x 128 x 128
+            in_channels=1, out_channels=28, kernel_size=3, padding=1)
+
+        # 16 x 28 x 256 x 256  -->  16 x 28 x 128 x 128
+        self.maxpool1 = nn.MaxPool2d(kernel_size=2)
+
+        # 16 x 28 x 128 x 128  -->  16 x 64 x 128 x 128
         self.conv2 = nn.Conv2d(
-            in_channels=28, out_channels=64, kernel_size=3, padding=1
-        )  # 8 x 64 x 128 x 128
+            in_channels=28, out_channels=64, kernel_size=3, padding=1)
+
+        # Fully connected network
         self.fc1 = nn.Linear(64 * 64 * 64, 30)
         self.dropout = nn.Dropout(0.2)  # Dropout
         self.fc2 = nn.Linear(30, 30)
         self.fc3 = nn.Linear(30, 2)
 
     def forward(self, x):
+        # Convolutional network
         x = self.conv1(x)
-        x = torch.relu(x)  # Activation Function
+        x = torch.relu(x)  # ReLU - activation function
         x = self.maxpool1(x)
         x = self.conv2(x)
         x = torch.relu(x)
         x = self.maxpool1(x)
-        x = x.view(x.size(0), -1)
+
+        # Fully connected network
+        x = x.view(x.size(0), -1)  # Flatten
         x = torch.relu(self.fc1(x))
         x = self.dropout(x)  # Dropout
         x = torch.relu(self.fc2(x))
@@ -185,84 +169,146 @@ model = xray_model()
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
-# Loss function
-criterion = nn.CrossEntropyLoss()
-
-# Optimizer
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-# ADAM optimizer is faster than SGD
-# Tried different learning rates(lr) - 0.01 and 0.0001
-# lr = 0.001 beacuse it gave the best results
 
 # Path to the saved model
 model_path = "xray_model.pth"
 
-# Training the model
 
-train_losses = []
-val_losses = []
-best_accuracy = 50
+# ----- Training the network -----
 
-# Chosing the number of epochs for the code to iterate the data
-num_epochs = 30
+# Function to train the network
 
-for epoch in tqdm(range(num_epochs)):
-    model.train()
-    combined_loss = 0
-    total_points = 0
-    correct = 0
+def train_NN(network, num_epochs, learning_rate):
 
-    for data, targets in train_loader:
-        optimizer.zero_grad()
-        outputs = model(data.to(device))
+    train_losses = []
+    val_losses = []
+    train_accuracies = []
+    val_accuracies = []
 
-        loss = criterion(outputs, targets)  # calculate loss
-        combined_loss += loss.item()
-        total_points += targets.size(0)
+    current_best_accuracy = 0
 
-        _, predicted = torch.max(outputs.data, 1)
+    # Loss function
+    criterion = nn.CrossEntropyLoss()
 
-        correct += (predicted == targets).sum().item()
-        loss.backward()  # backpropagation to calculate the gradients
-        optimizer.step()  # update the parameters with respect to gradients
+    # Optimizer - ADAM optimizer is faster than SGD
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    train_losses.append(combined_loss / total_points)
+    # Chosing the number of epochs for the code to iterate the data
 
-    train_accuracy = 100 * correct / total_points
+    for epoch in tqdm(range(num_epochs)):
+        network.train()  # Train network
 
-    print(
-        f"Epoch {epoch+1}/{num_epochs}, Training. Loss: {train_losses[-1]:.4f}, Accuracy: {train_accuracy:.2f}%"
-    )
+        combined_loss = 0
+        total_points = 0
+        correct = 0
 
-    # Report the accuracy on validation data
+        for images, labels in train_loader:     # Training dataset
+            images = images.to(device)          # Sends images to GPU
+            labels = labels.to(device)          # Sends labels to GPU
 
-    model.eval()  # set model to evaluation mode
-    correct = 0
-    total_points = 0
-    combined_loss = 0
+            optimizer.zero_grad()               # Resets gradients
+            outputs = network(images)           # Forward pass
 
-    with torch.no_grad():  # disable gradient calculation
-        for data, targets in val_loader:
-            outputs = model(data.to(device))
-
-            loss = criterion(outputs, targets)
-            _, predicted = torch.max(outputs.data, 1)
-            total_points += targets.size(0)
+            loss = criterion(outputs, labels)   # Compute loss
             combined_loss += loss.item()
-            correct += (predicted == targets).sum().item()
-    val_accuracy = 100 * correct / total_points
-    print(f"Validation Accuracy: {val_accuracy:.2f}%")
 
-    val_losses.append(combined_loss / total_points)
+            total_points += labels.size(0)
+            _, predicted = torch.max(outputs.data, 1)
+            correct += (predicted == labels).sum().item()
 
-    # Save the model if the current accuracy is better than before
-    if val_accuracy > best_accuracy:
-        torch.save(model.state_dict(), model_path)
-        print("Model saved!")
-        best_accuracy = val_accuracy
+            loss.backward()                     # Backpropagation
+            optimizer.step()                    # Update parameters
+
+        train_losses.append(combined_loss / total_points)
+        print(
+            f"Total points: {total_points}, train_loader: {len(train_loader)}")
+        train_accuracy = correct / total_points
+        train_accuracies.append(train_accuracy)
+        print(
+            f"Epoch {epoch+1}/{num_epochs}. Loss: {train_losses[-1]:.4f}, Accuracy: {train_accuracy:.2%}"
+        )
+
+        # --- Validation phase ---
+
+        network.eval()        # Set model to evaluation mode
+
+        correct = 0
+        total_points = 0
+        combined_loss = 0
+
+        with torch.no_grad():                  # Disable gradient calculation
+            for images, labels in val_loader:  # Validation dataset
+
+                images = images.to(device)      # Sends images to GPU
+                labels = labels.to(device)      # Sends labels to GPU
+
+                outputs = network(images)       # Forward pass
+
+                loss = criterion(outputs, labels)
+                combined_loss += loss.item()
+
+                _, predicted = torch.max(outputs.data, 1)
+                total_points += labels.size(0)
+                correct += (predicted == labels).sum().item()
+
+            val_accuracy = correct / total_points
+            val_losses.append(combined_loss / total_points)
+            print(f"Validation Accuracy: {val_accuracy:.2%}")
+
+        val_accuracies.append(val_accuracy)
+
+        # Save the model if the current accuracy is better than before
+        if val_accuracy > current_best_accuracy:
+            torch.save(model.state_dict(), model_path)
+            print("Model saved!")
+            current_best_accuracy = val_accuracy
+
+    # Plot the loss curve
+    x = [i for i in range(num_epochs)]
+    print(
+        f"x = {x}, {len(x)}, {len(train_losses)}, {len(val_accuracies)}, {len(train_accuracies)}")
+    plt.figure(figsize=(9, 6))
+    plt.plot(x, train_losses, label="Training Loss")
+    plt.plot(x, val_losses, label="Validation Loss")
+    plt.plot(x, train_accuracies, label="Training Accuracy")
+    plt.plot(x, val_accuracies, label="Validation Accuracy")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.grid()
+    plt.title("Network Development")
+    plt.legend()
+    plt.savefig("training_NN.png", dpi=200)
+    plt.close()
 
 
-# Testing the model
+# Tried different learning rates(lr) - 0.01 and 0.0001
+# lr = 0.001 gave the best results
+num_epochs = 3
+
+train_NN(model, num_epochs=num_epochs, learning_rate=0.001)
+
+# Loss function
+criterion = nn.CrossEntropyLoss()
+
+
+def plot_confusion_matrix(true, predicted):
+
+    # Plot Confusion matrix to show true and predicted labels
+    conf_matrix = confusion_matrix(true, predicted)
+    class_names = ["Normal", "Pneumonia"]
+
+    disp = ConfusionMatrixDisplay(conf_matrix, display_labels=class_names)
+    disp.plot(cmap=plt.cm.Blues)
+
+    # Adjust the font size of the axis labels
+    plt.xlabel('Predicted label', fontsize=13)
+    plt.ylabel('True label', fontsize=13)
+
+    plt.savefig("confusion_matrix.png", dpi=200)
+    plt.close()
+
+
+# ----- Testing the network -----
 
 true_labels = []
 predicted_labels = []
@@ -271,78 +317,34 @@ model = xray_model()
 model.load_state_dict(torch.load(model_path))
 model.to(device)
 
-# This code snippet does the same as the code above, but with the test data instead
-# but the code does so outside of the epoch iteration
-model.eval()  # set model to evaluation mode
-correct = 0
-total = 0
-with torch.no_grad():
-    for data, targets in test_loader:
-        outputs = model(data.to(device))
-        loss = criterion(outputs, targets)
-        _, predicted = torch.max(outputs.data, 1)
-        total += targets.size(0)
-        correct += (predicted == targets).sum().item()
-        true_labels.extend(targets.cpu().numpy())
-        predicted_labels.extend(predicted.cpu().numpy())
-# sum up the accuracy, to see how accurate the code is functioning
-accuracy = 100 * correct / total
-print(f"Test Accuracy: {accuracy:.2f}%")
 
+def evaluate_NN(network, test_loader):
+    network.eval()  # Set model to evaluation mode
+    correct = 0
+    total = 0
 
-# --------- Visualization ---------
-
-# Plot Confusion matrix to show true and predicted labels
-conf_matrix = confusion_matrix(true_labels, predicted_labels)
-class_names = ["Normal", "Pneumonia"]
-disp = ConfusionMatrixDisplay(conf_matrix, display_labels=class_names)
-disp.plot(cmap=plt.cm.Blues)
-plt.savefig("conf.png", dpi=200)
-plt.close()
-
-
-# Plot the loss curve
-plt.figure(figsize=(9, 6))
-plt.plot(range(num_epochs), train_losses, label="Loss")
-plt.plot(range(num_epochs), train_accuracy, label="Accuracy")
-plt.xlabel("Iterations")
-plt.ylabel("Loss")
-plt.grid()
-plt.title("Training")
-plt.legend()
-plt.savefig("training.png", dpi=200)
-plt.close()
-
-
-# Plot the loss curve
-plt.figure(figsize=(9, 6))
-plt.plot(range(num_epochs), val_losses, label="Loss")
-plt.plot(range(num_epochs), val_accuracy, label="Accuracy")
-plt.xlabel("Iterations")
-plt.ylabel("Loss")
-plt.grid()
-plt.title("Validation")
-plt.legend()
-plt.savefig("validation.png", dpi=200)
-plt.close()
-
-
-# Function that finds mislabeled data and appends to list
-def get_mislabeled(model):
     mislabeled_data = []
-    model.eval()
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            pred = output.argmax(dim=1)
-            incorrect_mask = pred != target
 
-            for i in range(len(data)):
-                if incorrect_mask[i]:
-                    image_data = data[i].cpu().numpy()
-                    true_label = target[i].cpu().item()
-                    predicted_label = pred[i].cpu().item()
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images = images.to(device)      # Sends images to GPU
+            labels = labels.to(device)      # Sends labels to GPU
+
+            outputs = model(images)         # Forward pass
+
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            true_labels.extend(labels.cpu().numpy())
+            predicted_labels.extend(predicted.cpu().numpy())
+
+            # Append misclassified images to list for plotting.
+            for i in range(len(labels)):
+                if predicted[i] != labels[i]:
+                    image_data = images[i].cpu()
+                    true_label = true_labels[i]
+                    predicted_label = predicted_labels[i]
 
                     mislabeled_data.append(
                         {
@@ -352,20 +354,15 @@ def get_mislabeled(model):
                         }
                     )
 
-                    if len(mislabeled_data) >= 10:
-                        break
+    # Test accuracy
+    accuracy = correct / total * 100
+    print(f"Test Accuracy: {accuracy:.2f}%")
 
-            if len(mislabeled_data) >= 10:
-                break
-
-    return mislabeled_data
-
-
-# Function that plots the mislabeled images found in the function before
-def plot_mislabeled(mislabeled_data):
+    # Plot misclassified images
     fig, axes = plt.subplots(2, 5, figsize=(10, 6))
     fig.subplots_adjust(hspace=0.5)
 
+    mislabeled_data = mislabeled_data[:10]
     for i, data_entry in enumerate(mislabeled_data):
         row = i // 5
         col = i % 5
@@ -380,7 +377,15 @@ def plot_mislabeled(mislabeled_data):
         ax.axis("off")
 
     plt.tight_layout()
+    plt.savefig("misclassified_images.png", dpi=200)
+    plt.close()
+
+    # Plot Confusion matrix to show true and predicted labels
+    plot_confusion_matrix(true_labels, predicted_labels)
 
 
-# mislabel_data = get_mislabeled(model)
-# plot_mislabeled(mislabel_data)
+# Load the best network
+model.load_state_dict(torch.load(model_path))
+
+# Show misclassified images
+evaluate_NN(model, test_loader)
